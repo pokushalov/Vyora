@@ -18,6 +18,15 @@ struct ImageViewerApp: App {
                 .environmentObject(model)
                 .frame(minWidth: 640, minHeight: 480)
                 .onAppear { NSWindow.allowsAutomaticWindowTabbing = false }
+                .onOpenURL { url in
+                    var isDir: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
+                       isDir.boolValue {
+                        model.loadFolder(url)
+                    } else {
+                        model.load(url: url)
+                    }
+                }
                 .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
         }
         .handlesExternalEvents(matching: ["*"])
