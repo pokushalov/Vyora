@@ -8,13 +8,13 @@
 
 ### Single-file design
 Everything lives in `main.swift` (~1400 lines), organized with `// MARK:` sections:
-- **App entry** — `ImageViewerApp: App` (SwiftUI single-window scene)
-- **App delegate** — `AppDelegate` handles file opens, dock icon, lifecycle
-- **Model** — `ViewerModel: ObservableObject` (singleton via `.shared`) owns all state
-- **Layout constants** — `Layout` enum with reserved areas
-- **Window sizing** — `WindowSizer` resizes window to fit image/video
-- **Views** — `ContentView`, `ImageCanvas`, `VideoCanvas`, `EmptyState`, `TopBar`, `BottomBar`, `InfoPanel`, `SettingsView`
-- **Helpers** — `VisualEffectBackground`, `KeyHandlingView`, `ScrollWheelView`, `PlayerViewRepresentable`
+- **App entry** - `ImageViewerApp: App` (SwiftUI single-window scene)
+- **App delegate** - `AppDelegate` handles file opens, dock icon, lifecycle
+- **Model** - `ViewerModel: ObservableObject` (singleton via `.shared`) owns all state
+- **Layout constants** - `Layout` enum with reserved areas
+- **Window sizing** - `WindowSizer` resizes window to fit image/video
+- **Views** - `ContentView`, `ImageCanvas`, `VideoCanvas`, `EmptyState`, `TopBar`, `BottomBar`, `InfoPanel`, `SettingsView`
+- **Helpers** - `VisualEffectBackground`, `KeyHandlingView`, `ScrollWheelView`, `PlayerViewRepresentable`
 
 ### Key patterns
 - `ViewerModel` is a singleton (`ViewerModel.shared`) so both SwiftUI and `AppDelegate` access the same state
@@ -28,7 +28,7 @@ No Xcode project. `build.sh` calls `swiftc` directly, assembles `.app` bundle, g
 
 ## Coding Conventions
 
-- All code in `main.swift` — do not split into multiple files
+- All code in `main.swift` - do not split into multiple files
 - Use `// MARK: -` comments to organize sections
 - SwiftUI views are structs, state management via `@EnvironmentObject` pointing to `ViewerModel`
 - Prefer `NSViewRepresentable` wrappers over SwiftUI-native controls when stability is needed (e.g., `AVPlayerView`, `NSVisualEffectView`)
@@ -54,11 +54,11 @@ Delete `Vyora.icns` and `AppStoreIcon.png`, then run `./build.sh`. The icon is d
 ## Testing
 
 No unit tests. Manual testing:
-1. `./build.sh` — should compile and install without errors
+1. `./build.sh` - should compile and install without errors
 2. Open the app, drag-and-drop an image folder
 3. Navigate with arrows, test zoom (scroll wheel, double-click, +/- buttons)
-4. Open a video — verify playback and slideshow behavior
-5. Press `I` — verify info panel with EXIF data
-6. Press `⌘,` — verify Settings window
+4. Open a video - verify playback and slideshow behavior
+5. Press `I` - verify info panel with EXIF data
+6. Press `⌘,` - verify Settings window
 7. Right-click → Copy Image, paste elsewhere
 8. Test "Open With → Vyora" from Finder
