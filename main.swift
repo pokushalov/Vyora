@@ -13,12 +13,14 @@ struct ImageViewerApp: App {
     @StateObject private var model = ViewerModel.shared
 
     var body: some Scene {
-        Window("Vyora", id: "main") {
+        WindowGroup {
             ContentView()
                 .environmentObject(model)
                 .frame(minWidth: 640, minHeight: 480)
                 .onAppear { NSWindow.allowsAutomaticWindowTabbing = false }
+                .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
         }
+        .handlesExternalEvents(matching: ["*"])
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unifiedCompact)
         .commands {
