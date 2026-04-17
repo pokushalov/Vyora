@@ -264,6 +264,11 @@ final class ViewerModel: ObservableObject {
     private var loadToken: URL?
     private var slideshowTimer: Timer?
 
+    /// Set when load(url:) was called on a sandboxed single file whose
+    /// parent folder we couldn't enumerate. We ask the user to grant
+    /// folder access on first navigation attempt.
+    private var pendingSingleFileFolder: URL?
+
     // Video playback owned by the model so it can observe end-of-video
     // and advance the slideshow only after the video has actually finished.
     let player = AVPlayer()
@@ -321,11 +326,14 @@ final class ViewerModel: ObservableObject {
             // Parent folder is readable — enable folder browsing.
             files = siblings
             index = siblings.firstIndex(of: url) ?? 0
+            pendingSingleFileFolder = nil
         } else {
             // Sandbox denied folder enumeration (e.g. Finder "Open With").
-            // Fall back to single-file mode so the image still loads.
+            // Fall back to single-file mode; remember the folder so we can
+            // offer to unlock browsing on the first arrow-key press.
             files = [url]
             index = 0
+            pendingSingleFileFolder = folder
         }
         loadCurrent()
         pushRecent(file: url)
@@ -414,6 +422,7 @@ final class ViewerModel: ObservableObject {
     }
 
     func next() {
+        if unlockFolderIfNeeded() { next(); return }
         guard !files.isEmpty else { return }
         index = (index + 1) % files.count
         loadCurrent()
@@ -421,10 +430,51 @@ final class ViewerModel: ObservableObject {
     }
 
     func previous() {
+        if unlockFolderIfNeeded() { previous(); return }
         guard !files.isEmpty else { return }
         index = (index - 1 + files.count) % files.count
         loadCurrent()
         if isPlaying { restartSlideshow() }
+    }
+
+    /// If we're in sandbox single-file mode, prompt the user once to grant
+    /// access to the parent folder so arrow-key navigation can work.
+    /// Returns true if access was just granted (caller should retry).
+    @discardableResult
+    private func unlockFolderIfNeeded() -> Bool {
+        guard files.count <= 1,
+              let folder = pendingSingleFileFolder,
+              let current = currentURL
+        else { return false }
+
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = folder
+        panel.message = "Grant Vyora access to browse the rest of \"\(folder.lastPathComponent)\"."
+        panel.prompt = "Allow"
+        guard panel.runModal() == .OK,
+              let granted = panel.url,
+              granted.standardizedFileURL == folder.standardizedFileURL
+        else {
+            // User cancelled or picked a different folder — stay single-file
+            // and don't re-prompt this session.
+            pendingSingleFileFolder = nil
+            return false
+        }
+
+        _ = granted.startAccessingSecurityScopedResource()
+        let siblings = Self.images(in: granted)
+        guard siblings.contains(current) else {
+            pendingSingleFileFolder = nil
+            return false
+        }
+        files = siblings
+        index = siblings.firstIndex(of: current) ?? 0
+        pushRecent(folder: granted)  // persists Security-Scoped Bookmark
+        pendingSingleFileFolder = nil
+        return true
     }
 
     // MARK: Slideshow
