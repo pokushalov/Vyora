@@ -19,7 +19,7 @@ struct ImageViewerApp: App {
                 .frame(minWidth: 640, minHeight: 480)
                 .onAppear {
                     NSWindow.allowsAutomaticWindowTabbing = false
-                    // Flush any URLs that arrived before SwiftUI was ready.
+                    AppDelegate.closeExtraWindows()
                     AppDelegate.flushPendingURLs()
                 }
                 .onOpenURL { url in
@@ -28,9 +28,13 @@ struct ImageViewerApp: App {
                     // inside the event-delivery call stack.
                     DispatchQueue.main.async {
                         handleIncomingURL(url, model: model)
+                        AppDelegate.closeExtraWindows()
                     }
                 }
         }
+        // Route all external open events (Finder "Open With", drag-to-dock,
+        // `open` CLI) to the existing window instead of spawning a new one.
+        .handlesExternalEvents(matching: ["*"])
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unifiedCompact)
         .commands {
@@ -165,6 +169,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             } else {
                 AppDelegate.pendingURLs.append(url)
+            }
+        }
+    }
+
+    /// Close any duplicate content windows SwiftUI may have spawned for
+    /// external URL events. Keeps only the frontmost main window.
+    static func closeExtraWindows() {
+        let mainWindows = NSApp.windows.filter { window in
+            window.canBecomeMain &&
+            window.styleMask.contains(.titled) == false ? true : window.canBecomeMain
+        }.filter { $0.contentViewController != nil || $0.contentView != nil }
+        // Keep the key window (or the first), close the rest.
+        let keeper = NSApp.keyWindow ?? mainWindows.first
+        for window in mainWindows where window !== keeper {
+            // Only close windows that look like our content windows (have
+            // our minimum size constraints). Avoid touching panels/sheets.
+            if window.minSize.width >= 640 || window.frame.width >= 640 {
+                window.close()
             }
         }
     }
