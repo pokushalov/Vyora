@@ -22,6 +22,14 @@ struct ImageViewerApp: App {
                     // Flush any URLs that arrived before SwiftUI was ready.
                     AppDelegate.flushPendingURLs()
                 }
+                .onOpenURL { url in
+                    // SwiftUI's primary file-open channel on macOS. Defer
+                    // to next runloop so we don't mutate model state from
+                    // inside the event-delivery call stack.
+                    DispatchQueue.main.async {
+                        handleIncomingURL(url, model: model)
+                    }
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unifiedCompact)
@@ -174,9 +182,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Shared helper so both SwiftUI onOpenURL and manual triggers route through
+/// Shared helper so both SwiftUI onOpenURL and AppDelegate route through
 /// the same code path. Caller must already be on the main thread.
+/// De-dupes back-to-back identical URLs in case both channels fire.
+private var lastHandledURL: (url: URL, at: Date)? = nil
+
 func handleIncomingURL(_ url: URL, model: ViewerModel) {
+    if let last = lastHandledURL,
+       last.url == url,
+       Date().timeIntervalSince(last.at) < 0.5 {
+        return
+    }
+    lastHandledURL = (url, Date())
+
     var isDir: ObjCBool = false
     let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
     guard exists else { return }
