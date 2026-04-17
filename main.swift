@@ -19,7 +19,6 @@ struct ImageViewerApp: App {
                 .frame(minWidth: 640, minHeight: 480)
                 .onAppear {
                     NSWindow.allowsAutomaticWindowTabbing = false
-                    AppDelegate.closeExtraWindows()
                     AppDelegate.flushPendingURLs()
                 }
                 .onOpenURL { url in
@@ -28,13 +27,9 @@ struct ImageViewerApp: App {
                     // inside the event-delivery call stack.
                     DispatchQueue.main.async {
                         handleIncomingURL(url, model: model)
-                        AppDelegate.closeExtraWindows()
                     }
                 }
         }
-        // Route all external open events (Finder "Open With", drag-to-dock,
-        // `open` CLI) to the existing window instead of spawning a new one.
-        .handlesExternalEvents(matching: ["*"])
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unifiedCompact)
         .commands {
@@ -148,7 +143,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static var swiftUIReady = false
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return false
+        // Quit normally when the user closes the window — prevents SwiftUI
+        // from spawning a second window on the next Finder "Open With" while
+        // the zombie old window is still in the WindowGroup.
+        return true
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
@@ -169,24 +167,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             } else {
                 AppDelegate.pendingURLs.append(url)
-            }
-        }
-    }
-
-    /// Close any duplicate content windows SwiftUI may have spawned for
-    /// external URL events. Keeps only the frontmost main window.
-    static func closeExtraWindows() {
-        let mainWindows = NSApp.windows.filter { window in
-            window.canBecomeMain &&
-            window.styleMask.contains(.titled) == false ? true : window.canBecomeMain
-        }.filter { $0.contentViewController != nil || $0.contentView != nil }
-        // Keep the key window (or the first), close the rest.
-        let keeper = NSApp.keyWindow ?? mainWindows.first
-        for window in mainWindows where window !== keeper {
-            // Only close windows that look like our content windows (have
-            // our minimum size constraints). Avoid touching panels/sheets.
-            if window.minSize.width >= 640 || window.frame.width >= 640 {
-                window.close()
             }
         }
     }
@@ -329,17 +309,31 @@ final class ViewerModel: ObservableObject {
     }
 
     func load(url: URL) {
-        let folder = url.deletingLastPathComponent()
-        let images = Self.images(in: folder)
+        // Ensure we have file-coordinated access (sandbox may give us only
+        // the single URL Finder handed us, without permission to list the
+        // parent folder).
+        _ = url.startAccessingSecurityScopedResource()
 
-        files = images
-        index = images.firstIndex(of: url) ?? 0
+        let folder = url.deletingLastPathComponent()
+        let siblings = Self.images(in: folder)
+
+        if siblings.contains(url) {
+            // Parent folder is readable — enable folder browsing.
+            files = siblings
+            index = siblings.firstIndex(of: url) ?? 0
+        } else {
+            // Sandbox denied folder enumeration (e.g. Finder "Open With").
+            // Fall back to single-file mode so the image still loads.
+            files = [url]
+            index = 0
+        }
         loadCurrent()
         pushRecent(file: url)
-        pushRecent(folder: folder)
+        if !siblings.isEmpty { pushRecent(folder: folder) }
     }
 
     func loadFolder(_ folder: URL) {
+        _ = folder.startAccessingSecurityScopedResource()
         let images = Self.images(in: folder)
         guard let first = images.first else { return }
         files = images
