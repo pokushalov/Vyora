@@ -19,17 +19,13 @@ struct ImageViewerApp: App {
                 .frame(minWidth: 640, minHeight: 480)
                 .onAppear { NSWindow.allowsAutomaticWindowTabbing = false }
                 .onOpenURL { url in
-                    var isDir: ObjCBool = false
-                    if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
-                       isDir.boolValue {
-                        model.loadFolder(url)
-                    } else {
-                        model.load(url: url)
+                    // Defer to next runloop so we don't mutate model state
+                    // inside the event-delivery call stack (prevents hangs).
+                    DispatchQueue.main.async {
+                        handleIncomingURL(url, model: model)
                     }
                 }
-                .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
         }
-        .handlesExternalEvents(matching: ["*"])
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unifiedCompact)
         .commands {
@@ -155,27 +151,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    /// Files dropped on the dock icon or sent via "Open With".
-    func application(_ application: NSApplication, open urls: [URL]) {
-        guard let url = urls.first else { return }
-        let model = ViewerModel.shared
+}
 
-        var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
-           isDir.boolValue {
-            model.loadFolder(url)
-        } else {
-            model.load(url: url)
-        }
+/// Shared helper so both SwiftUI onOpenURL and manual triggers route through
+/// the same code path. Caller must already be on the main thread.
+func handleIncomingURL(_ url: URL, model: ViewerModel) {
+    var isDir: ObjCBool = false
+    let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+    guard exists else { return }
 
-        // Bring the existing window to the front instead of opening a new one.
-        DispatchQueue.main.async {
-            for window in NSApp.windows where window.canBecomeMain {
-                window.makeKeyAndOrderFront(nil)
-            }
-            NSApp.activate(ignoringOtherApps: true)
-        }
+    if isDir.boolValue {
+        model.loadFolder(url)
+    } else {
+        model.load(url: url)
     }
+
+    // Bring window to front without triggering a new layout pass mid-open.
+    for window in NSApp.windows where window.canBecomeMain {
+        window.makeKeyAndOrderFront(nil)
+    }
+    NSApp.activate(ignoringOtherApps: true)
 }
 
 // MARK: - Model
