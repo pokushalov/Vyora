@@ -17,13 +17,10 @@ struct ImageViewerApp: App {
             ContentView()
                 .environmentObject(model)
                 .frame(minWidth: 640, minHeight: 480)
-                .onAppear { NSWindow.allowsAutomaticWindowTabbing = false }
-                .onOpenURL { url in
-                    // Defer to next runloop so we don't mutate model state
-                    // inside the event-delivery call stack (prevents hangs).
-                    DispatchQueue.main.async {
-                        handleIncomingURL(url, model: model)
-                    }
+                .onAppear {
+                    NSWindow.allowsAutomaticWindowTabbing = false
+                    // Flush any URLs that arrived before SwiftUI was ready.
+                    AppDelegate.flushPendingURLs()
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -133,15 +130,15 @@ struct AboutSettingsTab: View {
 // MARK: - App delegate
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    /// Don't quit the process when the window is closed — it stays in the
-    /// background so subsequent Finder "Open With" calls reuse the same
-    /// instance instead of spawning a new one.
+    /// URLs received from Finder before SwiftUI finished setting up its
+    /// window. We stash them and flush from ContentView.onAppear.
+    private static var pendingURLs: [URL] = []
+    private static var swiftUIReady = false
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return false
     }
 
-    /// When the dock icon is clicked while the window is hidden, bring it
-    /// back instead of doing nothing.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
         if !hasVisibleWindows {
             for window in sender.windows where window.canBecomeMain {
@@ -151,6 +148,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    /// Single entry point for Finder "Open With", double-click, drag-to-dock, `open` CLI.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            if AppDelegate.swiftUIReady {
+                DispatchQueue.main.async {
+                    handleIncomingURL(url, model: ViewerModel.shared)
+                }
+            } else {
+                AppDelegate.pendingURLs.append(url)
+            }
+        }
+    }
+
+    static func flushPendingURLs() {
+        swiftUIReady = true
+        let queued = pendingURLs
+        pendingURLs.removeAll()
+        guard !queued.isEmpty else { return }
+        DispatchQueue.main.async {
+            for url in queued {
+                handleIncomingURL(url, model: ViewerModel.shared)
+            }
+        }
+    }
 }
 
 /// Shared helper so both SwiftUI onOpenURL and manual triggers route through
@@ -1257,7 +1278,12 @@ struct BottomBar: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            ToolButton(systemName: "folder") { model.openPanel() }
+            // Hide the folder toolbar button on the empty state — EmptyState
+            // already has a large "Open Image…" button, and the small one
+            // visually collides with the Recents card.
+            if model.image != nil || model.videoURL != nil {
+                ToolButton(systemName: "folder") { model.openPanel() }
+            }
             if model.files.count > 1 {
                 ToolButton(systemName: "chevron.left") { model.previous() }
                 Text(model.counterText)
