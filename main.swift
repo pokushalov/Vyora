@@ -13,21 +13,24 @@ struct ImageViewerApp: App {
     @StateObject private var model = ViewerModel.shared
 
     var body: some Scene {
-        WindowGroup {
+        // Single Window scene, not WindowGroup: a WindowGroup is a
+        // multi-window container, and SwiftUI routes Finder open events
+        // to a NEW group window when no existing one claims them. Window
+        // is structurally unique — a second viewer window cannot exist.
+        Window("Vyora", id: "main") {
             ContentView()
                 .environmentObject(model)
                 .frame(minWidth: 640, minHeight: 480)
+                .background(WindowAccessor())
                 .onAppear {
                     NSWindow.allowsAutomaticWindowTabbing = false
                     AppDelegate.flushPendingURLs()
                 }
                 .onOpenURL { url in
-                    // SwiftUI's primary file-open channel on macOS. Defer
-                    // to next runloop so we don't mutate model state from
-                    // inside the event-delivery call stack.
-                    DispatchQueue.main.async {
-                        handleIncomingURL(url, model: model)
-                    }
+                    // SwiftUI's primary file-open channel on macOS. A Finder
+                    // multi-select arrives as separate calls in the same
+                    // runloop tick — the funnel coalesces them into one batch.
+                    enqueueIncomingURLs([url], model: model)
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -143,31 +146,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static var swiftUIReady = false
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        // Quit normally when the user closes the window — prevents SwiftUI
-        // from spawning a second window on the next Finder "Open With" while
-        // the zombie old window is still in the WindowGroup.
+        // Quit when the user closes the window — standard single-window
+        // utility behavior.
         return true
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
         if !hasVisibleWindows {
-            for window in sender.windows where window.canBecomeMain {
-                window.makeKeyAndOrderFront(nil)
-            }
+            ViewerWindow.current?.makeKeyAndOrderFront(nil)
         }
         return true
     }
 
-    /// Single entry point for Finder "Open With", double-click, drag-to-dock, `open` CLI.
+    /// AppKit file-open channel: Finder "Open With", double-click,
+    /// drag-to-dock, `open` CLI. Multi-select arrives as one call.
     func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls {
-            if AppDelegate.swiftUIReady {
-                DispatchQueue.main.async {
-                    handleIncomingURL(url, model: ViewerModel.shared)
-                }
-            } else {
-                AppDelegate.pendingURLs.append(url)
-            }
+        if AppDelegate.swiftUIReady {
+            enqueueIncomingURLs(urls, model: ViewerModel.shared)
+        } else {
+            AppDelegate.pendingURLs.append(contentsOf: urls)
         }
     }
 
@@ -176,41 +173,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let queued = pendingURLs
         pendingURLs.removeAll()
         guard !queued.isEmpty else { return }
-        DispatchQueue.main.async {
-            for url in queued {
-                handleIncomingURL(url, model: ViewerModel.shared)
-            }
-        }
+        enqueueIncomingURLs(queued, model: ViewerModel.shared)
     }
 }
 
-/// Shared helper so both SwiftUI onOpenURL and AppDelegate route through
-/// the same code path. Caller must already be on the main thread.
-/// De-dupes back-to-back identical URLs in case both channels fire.
-private var lastHandledURL: (url: URL, at: Date)? = nil
+// MARK: - Incoming URL funnel
 
-func handleIncomingURL(_ url: URL, model: ViewerModel) {
-    if let last = lastHandledURL,
-       last.url == url,
-       Date().timeIntervalSince(last.at) < 0.5 {
-        return
+/// Both file-open channels (SwiftUI .onOpenURL and AppDelegate
+/// application(_:open:)) feed this funnel. URLs arriving within the same
+/// runloop tick are coalesced into one batch, so a Finder multi-select
+/// opens as a browsable set instead of last-file-wins — and the same event
+/// delivered through both channels collapses into a single load.
+/// Main thread only.
+private var incomingURLBuffer: [URL] = []
+private var lastHandledBatch: (urls: Set<URL>, at: Date)? = nil
+
+func enqueueIncomingURLs(_ urls: [URL], model: ViewerModel) {
+    let flushScheduled = !incomingURLBuffer.isEmpty
+    incomingURLBuffer.append(contentsOf: urls)
+    guard !flushScheduled else { return }
+    DispatchQueue.main.async {
+        var seen = Set<URL>()
+        let batch = incomingURLBuffer.filter { seen.insert($0).inserted }
+        incomingURLBuffer.removeAll()
+        handleIncomingBatch(batch, model: model)
     }
-    lastHandledURL = (url, Date())
+}
 
-    var isDir: ObjCBool = false
-    let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
-    guard exists else { return }
+func handleIncomingBatch(_ batch: [URL], model: ViewerModel) {
+    var urls = batch.filter { FileManager.default.fileExists(atPath: $0.path) }
 
-    if isDir.boolValue {
-        model.loadFolder(url)
+    // Drop URLs already handled moments ago via the other delivery channel.
+    if let last = lastHandledBatch, Date().timeIntervalSince(last.at) < 1.0 {
+        urls.removeAll { last.urls.contains($0) }
+    }
+    guard !urls.isEmpty else { return }
+    lastHandledBatch = (Set(urls), Date())
+
+    if urls.count == 1 {
+        let url = urls[0]
+        var isDir: ObjCBool = false
+        _ = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+        if isDir.boolValue {
+            model.loadFolder(url)
+        } else {
+            model.load(url: url)
+        }
     } else {
-        model.load(url: url)
+        model.load(urls: urls)
     }
 
-    // Bring window to front without triggering a new layout pass mid-open.
-    for window in NSApp.windows where window.canBecomeMain {
-        window.makeKeyAndOrderFront(nil)
-    }
+    ViewerWindow.current?.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
 }
 
@@ -349,6 +362,24 @@ final class ViewerModel: ObservableObject {
         loadCurrent()
         pushRecent(file: first)
         pushRecent(folder: folder)
+    }
+
+    /// Open several files at once (Finder multi-select, multi-file drop)
+    /// as the browsing set.
+    func load(urls: [URL]) {
+        let media = urls.filter { Self.isImage($0) || Self.isVideo($0) }
+        if media.count <= 1 {
+            if let only = media.first { load(url: only) }
+            return
+        }
+        for url in media { _ = url.startAccessingSecurityScopedResource() }
+        files = media.sorted {
+            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+        }
+        index = 0
+        pendingSingleFileFolder = nil
+        loadCurrent()
+        if let url = currentURL { pushRecent(file: url) }
     }
 
     static func images(in folder: URL) -> [URL] {
@@ -874,7 +905,9 @@ enum WindowSizer {
     /// on-screen. Preserves aspect ratio and centers around the current frame.
     static func fit(to imageSize: NSSize) {
         guard imageSize.width > 0, imageSize.height > 0 else { return }
-        guard let window = NSApp.windows.first(where: { $0.isVisible }) else { return }
+        // Never NSApp.windows.first(where: isVisible) — that can grab the
+        // Settings window when it's open and resize the wrong one.
+        guard let window = ViewerWindow.current else { return }
         guard let screen = window.screen ?? NSScreen.main else { return }
 
         let visible = screen.visibleFrame
@@ -994,18 +1027,22 @@ struct ContentView: View {
         }
         .onHover { hovering = $0 }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-            guard let provider = providers.first else { return false }
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                guard let url = url else { return }
-                DispatchQueue.main.async {
-                    var isDir: ObjCBool = false
-                    if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
-                       isDir.boolValue {
-                        model.loadFolder(url)
-                    } else {
-                        model.load(url: url)
+            guard !providers.isEmpty else { return false }
+            // Resolve every dropped item, then route through the same
+            // single/folder/multi logic as Finder opens.
+            var dropped: [URL] = []
+            let group = DispatchGroup()
+            for provider in providers {
+                group.enter()
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    DispatchQueue.main.async {
+                        if let url = url { dropped.append(url) }
+                        group.leave()
                     }
                 }
+            }
+            group.notify(queue: .main) {
+                handleIncomingBatch(dropped, model: model)
             }
             return true
         }
@@ -1596,6 +1633,25 @@ struct PlayerViewRepresentable: NSViewRepresentable {
 }
 
 // MARK: - NSViewRepresentable helpers
+
+/// The NSWindow hosting the viewer content. Window-level operations
+/// (fit-to-image, bring-to-front) must target this window specifically —
+/// NSApp.windows also contains the Settings window.
+enum ViewerWindow {
+    static weak var current: NSWindow?
+}
+
+struct WindowAccessor: NSViewRepresentable {
+    func makeNSView(context: Context) -> WindowAccessorView { WindowAccessorView() }
+    func updateNSView(_ nsView: WindowAccessorView, context: Context) {}
+}
+
+final class WindowAccessorView: NSView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window { ViewerWindow.current = window }
+    }
+}
 
 struct VisualEffectBackground: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {

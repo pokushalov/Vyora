@@ -8,7 +8,7 @@
 
 ### Single-file design
 Everything lives in `main.swift` (~1400 lines), organized with `// MARK:` sections:
-- **App entry** - `ImageViewerApp: App` (SwiftUI single-window scene)
+- **App entry** - `ImageViewerApp: App` (SwiftUI `Window` scene — structurally single-window, a second viewer window cannot exist)
 - **App delegate** - `AppDelegate` handles file opens, dock icon, lifecycle
 - **Model** - `ViewerModel: ObservableObject` (singleton via `.shared`) owns all state
 - **Layout constants** - `Layout` enum with reserved areas
@@ -18,6 +18,7 @@ Everything lives in `main.swift` (~1400 lines), organized with `// MARK:` sectio
 
 ### Key patterns
 - `ViewerModel` is a singleton (`ViewerModel.shared`) so both SwiftUI and `AppDelegate` access the same state
+- All file-open channels (`.onOpenURL`, `AppDelegate.application(_:open:)`, drag-and-drop) funnel through `enqueueIncomingURLs`, which coalesces URLs arriving in the same runloop tick — dedupes double delivery and turns multi-select opens into a browsable set
 - Image loading is async via `DispatchQueue` + `NSCache` (5 items) + neighbor prefetch using `ImageIO` for immediate bitmap decode
 - Video uses `AVPlayerView` wrapped in `NSViewRepresentable` (not SwiftUI's `VideoPlayer`, which crashes on some macOS versions)
 - Window resize is deferred via `DispatchQueue.main.async` to avoid crashes during SwiftUI layout passes
