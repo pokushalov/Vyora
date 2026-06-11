@@ -22,7 +22,7 @@ Everything lives in `main.swift` (~1400 lines), organized with `// MARK:` sectio
 - Image loading is async via `DispatchQueue` + `NSCache` (5 items) + neighbor prefetch using `ImageIO` for immediate bitmap decode
 - Video uses `AVPlayerView` wrapped in `NSViewRepresentable` (not SwiftUI's `VideoPlayer`, which crashes on some macOS versions)
 - Window resize is deferred via `DispatchQueue.main.async` to avoid crashes during SwiftUI layout passes
-- Recent files use Security-Scoped Bookmarks for sandbox compatibility
+- Recent files and user-granted folder roots (`grantedFolders`) use Security-Scoped Bookmarks for sandbox compatibility; granted roots are re-opened on every launch so anything underneath never re-prompts
 
 ### Build system
 No Xcode project. `build.sh` calls `swiftc` directly, assembles `.app` bundle, generates `Info.plist`, copies to `/Applications`, registers with Launch Services.

@@ -70,7 +70,7 @@ struct SettingsView: View {
             AboutSettingsTab()
                 .tabItem { Label("About", systemImage: "info.circle") }
         }
-        .frame(width: 420, height: 280)
+        .frame(width: 440, height: 320)
     }
 }
 
@@ -97,6 +97,23 @@ struct GeneralSettingsTab: View {
                 Button("Clear Recents") {
                     model.clearRecents()
                 }
+            }
+
+            Divider()
+
+            HStack {
+                Text(model.grantedFolders.isEmpty
+                     ? "Folder access: asks per folder"
+                     : "Always readable: " + model.grantedFolders.map(\.lastPathComponent).joined(separator: ", "))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(model.grantedFolders.map(\.path).joined(separator: "\n"))
+                Spacer()
+                if !model.grantedFolders.isEmpty {
+                    Button("Forget") { model.forgetGrantedFolders() }
+                }
+                Button("Grant Access…") { model.grantAccessPanel() }
             }
         }
         .padding(20)
@@ -291,6 +308,7 @@ final class ViewerModel: ObservableObject {
         let stored = UserDefaults.standard.double(forKey: "slideshowInterval")
         self.slideshowInterval = stored > 0 ? stored : 4.0
         loadRecents()
+        loadGrantedFolders()
     }
 
     var currentURL: URL? {
@@ -414,6 +432,53 @@ final class ViewerModel: ObservableObject {
         saveRecents()
     }
 
+    // MARK: Granted folder access
+
+    /// Folder roots the user granted read access to, persisted as
+    /// Security-Scoped Bookmarks and re-opened on every launch, so the
+    /// app never has to re-ask for anything underneath them.
+    @Published var grantedFolders: [URL] = []
+    private let grantedFoldersKey = "grantedFolders"
+
+    private func loadGrantedFolders() {
+        grantedFolders = Self.resolveBookmarks(
+            UserDefaults.standard.array(forKey: grantedFoldersKey) as? [Data] ?? [])
+    }
+
+    private func saveGrantedFolders() {
+        UserDefaults.standard.set(Self.makeBookmarks(grantedFolders), forKey: grantedFoldersKey)
+    }
+
+    func rememberGrantedFolder(_ url: URL) {
+        let path = url.standardizedFileURL.path
+        if grantedFolders.contains(where: { path == $0.path || path.hasPrefix($0.path + "/") }) {
+            return // already covered by an existing root
+        }
+        grantedFolders.removeAll { $0.path.hasPrefix(path + "/") } // drop narrower roots
+        grantedFolders.append(url.standardizedFileURL)
+        saveGrantedFolders()
+    }
+
+    func forgetGrantedFolders() {
+        grantedFolders.removeAll()
+        saveGrantedFolders()
+    }
+
+    /// Pre-grant read access to a broad folder (e.g. the home folder) so
+    /// per-folder prompts never appear again.
+    func grantAccessPanel() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: "/Users/\(NSUserName())", isDirectory: true)
+        panel.message = "Choose a folder Vyora may always read. Pick your home folder to cover everything."
+        panel.prompt = "Grant"
+        guard panel.runModal() == .OK, let url = panel.url?.standardizedFileURL else { return }
+        _ = url.startAccessingSecurityScopedResource()
+        rememberGrantedFolder(url)
+    }
+
     /// Load recents from Security-Scoped Bookmarks stored in UserDefaults.
     /// Falls back to plain paths for backwards compat with pre-sandbox data.
     private func loadRecents() {
@@ -483,27 +548,30 @@ final class ViewerModel: ObservableObject {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.directoryURL = folder
-        panel.message = "Grant Vyora access to browse the rest of \"\(folder.lastPathComponent)\"."
+        panel.message = "Grant Vyora access to \"\(folder.lastPathComponent)\" — or pick any parent (even your home folder) to stop being asked about other folders too."
         panel.prompt = "Allow"
+        let target = folder.standardizedFileURL
         guard panel.runModal() == .OK,
-              let granted = panel.url,
-              granted.standardizedFileURL == folder.standardizedFileURL
+              let granted = panel.url?.standardizedFileURL,
+              // The folder itself or any ancestor — a broader grant covers it.
+              target.path == granted.path || target.path.hasPrefix(granted.path + "/")
         else {
-            // User cancelled or picked a different folder — stay single-file
+            // User cancelled or picked an unrelated folder — stay single-file
             // and don't re-prompt this session.
             pendingSingleFileFolder = nil
             return false
         }
 
         _ = granted.startAccessingSecurityScopedResource()
-        let siblings = Self.images(in: granted)
+        rememberGrantedFolder(granted) // persists Security-Scoped Bookmark
+        let siblings = Self.images(in: target)
         guard siblings.contains(current) else {
             pendingSingleFileFolder = nil
             return false
         }
         files = siblings
         index = siblings.firstIndex(of: current) ?? 0
-        pushRecent(folder: granted)  // persists Security-Scoped Bookmark
+        pushRecent(folder: target)
         pendingSingleFileFolder = nil
         return true
     }

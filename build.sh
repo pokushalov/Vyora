@@ -106,6 +106,22 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 PLIST
 
 # ── Code signing ───────────────────────────────────────────────────────
+# Dev builds: sign with a stable identity when one exists, so TCC grants
+# (Desktop/Documents/Full Disk Access) survive rebuilds. The default
+# linker ad-hoc signature changes every build, making macOS treat each
+# rebuild as a brand-new app and re-ask for everything.
+# One-time setup: Keychain Access → Certificate Assistant → Create a
+# Certificate… → name "Vyora Dev", type "Code Signing".
+if ! $RELEASE; then
+    DEV_IDENTITY="${CODESIGN_IDENTITY:-Vyora Dev}"
+    if security find-identity -v -p codesigning 2>/dev/null | grep -q "$DEV_IDENTITY"; then
+        echo "Code signing dev build (identity: $DEV_IDENTITY)…"
+        codesign --force --sign "$DEV_IDENTITY" "$APP_DIR"
+    else
+        echo "No '$DEV_IDENTITY' identity — leaving linker ad-hoc signature (TCC grants reset on rebuild)"
+    fi
+fi
+
 if $RELEASE; then
     # Ad-hoc sign with hardened runtime + sandbox entitlements.
     # Replace "-" with your Developer ID or "3rd Party Mac Developer Application"
